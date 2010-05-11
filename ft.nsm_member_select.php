@@ -40,12 +40,16 @@ class Nsm_member_select_ft extends EE_Fieldtype
 	 * Constructor
 	 * 
 	 * @access public
-	 * 
-	 * Calls the parent constructor
 	 */
 	public function __construct()
 	{
 		parent::EE_Fieldtype();
+		if(!isset($this->EE->session->cache[__CLASS__]))
+		{
+			$this->EE->session->cache[__CLASS__] = array();
+			$this->EE->session->cache[__CLASS__]["members"] = array();
+			$this->EE->session->cache[__CLASS__]["member_custom_fields"] = array();
+		}
 	}	
 
 	/**
@@ -111,12 +115,13 @@ class Nsm_member_select_ft extends EE_Fieldtype
 	 * Display the field in the publish form
 	 * 
 	 * @access public
-	 * @param $data String Contains the current field data. Blank for new entries.
+	 * @param $data String Contains the current field data. Blank for new members.
 	 * @return String The custom field HTML
 	 */
 	public function display_field($data = FALSE)
 	{
-		$data = (empty($data)) ? array() : explode("|", $data);
+		if(!is_array($data))
+			$data = explode("|", $data);
 
 		switch ($this->settings['field_ui_mode']) {
 			case "select":
@@ -134,6 +139,17 @@ class Nsm_member_select_ft extends EE_Fieldtype
 	}
 
 	/**
+	 * Publish form validation
+	 * 
+	 * @param $data array Contains the submitted field data.
+	 * @return mixed TRUE or an error message
+	 */
+	public function validate($data)
+	{
+		return TRUE;
+	}
+
+	/**
 	 * Pre-process the data and return a string
 	 *
 	 * @access public
@@ -141,7 +157,8 @@ class Nsm_member_select_ft extends EE_Fieldtype
 	 * @return string Concatenated string f member groups
 	 */
 	public function save($data){
-		return implode("|", $data);
+		$this->EE->load->helper('custom_field');
+		return encode_multi_field($data);
 	}
 
 	/**
@@ -156,22 +173,116 @@ class Nsm_member_select_ft extends EE_Fieldtype
 	 */
 	public function replace_tag($data, $params = FALSE, $tagdata = FALSE)
 	{
+		$this->EE->load->helper('custom_field');
+		$members = decode_multi_field($data);
+		
 		$params = array_merge(array(
-			"divider" => "|"
-		), $params);
+			"backspace" => FALSE,
+			"glue" => ", ",
+			"multi_field" => FALSE,
+			"multi_field_glue" => ", ",
+			"value" => "member_id",
+			"prefix" => "ms:"
+		), (array) $params);
 
-		return str_replace("|", $params["divider"], $data);
+		$members = $this->_getMemberData($members, $params);
+
+		return ($tagdata) ? $this->_parseMulti($members, $params, $tagdata) : $this->_parseSingle($members, $params);
 	}
 
 	/**
-	 * Publish form validation
+	 * Get the member data from the DB
 	 * 
-	 * @param $data array Contains the submitted field data.
-	 * @return mixed TRUE or an error message
+	 * @access private
+	 * @param $members array The entry ids
+	 * @param $params array the tag params
+	 * @return array Member DB data
 	 */
-	public function validate($data)
+	private function _getMemberData($members, $params)
 	{
-		return TRUE;
+		if(!$members) return array();
+
+		$required_members = $members; 
+		foreach($required_members as $k => $v)
+		{
+			if(array_key_exists($v, $this->EE->session->cache[__CLASS__]))
+			{
+				unset($required_members[$k]);
+			}
+		}
+
+		if(!empty($required_members))
+		{
+			$this->EE->db->from("exp_members")
+						->join("exp_member_data", 'exp_members.member_id = exp_member_data.member_id')
+						->where_in("exp_members.member_id", $required_members);
+
+			$query = $this->EE->db->get();
+			foreach ($query->result_array() as $member)
+			{
+				$this->EE->session->cache[__CLASS__]["member_data"][$member["member_id"]] = $member;
+			}
+		}
+
+		$ret = array();
+		foreach ($members as $member_id)
+		{
+			if(!isset($this->EE->session->cache[__CLASS__]["member_data"][$member_id]))
+				continue;
+
+			$ret[] = $this->EE->session->cache[__CLASS__]["member_data"][$member_id];
+		}
+		return $ret;
+	}
+
+	/**
+	 * Parse a single tag
+	 * 
+	 * @access private
+	 * @param $members array The entry ids
+	 * @param $params array the tag params
+	 * @return string The entry ids concatenated with glue
+	 */
+	private function _parseSingle($members, $params)
+	{
+		$ret = array();
+		foreach ($members as $member_id => $member_data)
+		{
+			if(self::_isTrue($params["multi_field"]))
+			{
+				$member_data[$params["value"]] = implode($params["multi_field_glue"], decode_multi_field($member_data[$params["value"]]));
+			}
+			$ret[] = $member_data[$params["value"]];
+		}
+		return implode($params["glue"], $ret);
+	}
+	/**
+	 * Parse a tag pair
+	 * 
+	 * @access private
+	 * @param $members array The entry ids
+	 * @param $params array the tag params
+	 * @param $tagdata string The data between the tag pair
+	 * @return string The entry ids concatenated with glue
+	 */
+	private function _parseMulti($members, $params, $tagdata)
+	{
+		$chunk = '';
+		foreach($members as $count => $member)
+		{
+			$vars['count'] = $count + 1;
+			foreach ($member as $key => $value)
+			{
+				$vars[$params["prefix"] . $key] = $value;
+			}
+			$tmp = $this->EE->functions->prep_conditionals($tagdata, $vars);
+			$chunk .= $this->EE->functions->var_swap($tmp, $vars);
+		}
+		if ($params['backspace'])
+		{
+			$chunk = substr($chunk, 0, - $params['backspace']);
+		}
+		return $chunk;
 	}
 
 	/**
@@ -237,6 +348,18 @@ class Nsm_member_select_ft extends EE_Fieldtype
 		}
 		$r .= "</select>";
 		return $r;
+	}
+
+	/**
+	 * Checks if a param value is true
+	 * 
+	 * @access private
+	 * @param $value mixed The param value
+	 * @return boolean
+	 */
+
+	private static function _isTrue($value){
+		return in_array($value, array("yes", "y", "1", TRUE, "true", "TRUE"));
 	}
 
 }
